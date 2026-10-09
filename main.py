@@ -36,24 +36,29 @@ except Exception as e:
     print(f"[WARN] Gemini yuklenemedi: {e}")
 
 
-async def generate_ai_advice(weight, goals, frequency, focus, equipment):
+async def generate_ai_advice(weight, goals, frequency, focus, equipment, first_name="Sporcu", rm_text="", logs_text=""):
     if not gemini_client:
-        return generate_offline_advice(weight, goals, frequency, focus, equipment)
+        return generate_offline_advice(weight, goals, frequency, focus, equipment, first_name)
 
     prompt = f"""Sen profesyonel bir hibrit atlet kocusun. Hem dovus sporlari hem de guc antrenmani konusunda uzmansin.
-Asagidaki sporcu bilgilerine gore kisisellestirilmis bir antrenman programi ve strateji hazirla.
+Asagidaki sporcu bilgilerine ve gecmis performansina gore {first_name} icin kisisellestirilmis bir antrenman programi ve strateji hazirla.
 
 SPORCU BILGILERI:
+- Isim: {first_name}
 - Mevcut Kilo: {weight} kg
 - Hedefler: {goals}
 - Haftalik Antrenman Sikligi: {frequency} gun
 - Ana Brans / Odak Alani: {focus}
 - Mevcut Ekipmanlar: {equipment}
 
+GECMIS PERFORMANS VE DURUM:
+- En Iyi Kaldirislar (1RM): {rm_text}
+- Son Antrenman Durumu (Enerji/Ruh Hali): {logs_text}
+
 CEVAP FORMATI (3 bolum, ## ile ayir):
-1. Ilk bolum: Genel strateji ve analiz (3-4 cumle)
+1. Ilk bolum: Genel strateji ve {first_name} icin ozel analiz (gecmis verilere atifta bulun, orn: "son antrenmanlarindaki enerjin dusuk oldugu icin..." veya "1RM skorlarina gore gucun iyi...") (3-4 cumle)
 2. Ikinci bolum (## ile ayir): Haftalik antrenman programi (gun gun detayli)
-3. Ucuncu bolum (## ile ayir): Motivasyon ve zihinsel kocluk notu (2-3 cumle, motive edici)
+3. Ucuncu bolum (## ile ayir): Motivasyon ve zihinsel kocluk notu (ismiyle hitap ederek 2-3 cumle, motive edici)
 
 Turkce cevap ver. Kisa ve oz ol ama detayli program ver."""
 
@@ -65,10 +70,10 @@ Turkce cevap ver. Kisa ve oz ol ama detayli program ver."""
         return response.text
     except Exception as e:
         print(f"[ERROR] Gemini API Hatasi: {e}")
-        return generate_offline_advice(weight, goals, frequency, focus, equipment)
+        return generate_offline_advice(weight, goals, frequency, focus, equipment, first_name)
 
 
-def generate_offline_advice(weight, goals, frequency, focus, equipment):
+def generate_offline_advice(weight, goals, frequency, focus, equipment, first_name="Sporcu"):
     """Gemini API olmadan kisisellestirilmis antrenman programi ureten template sistemi."""
     freq = int(frequency) if frequency else 3
     w = float(weight) if weight else 75
@@ -97,7 +102,7 @@ def generate_offline_advice(weight, goals, frequency, focus, equipment):
         weight_note = f"{w} kg ile agir siklet kategorisinde yer aliyorsun. Patlayici guc ve dayaniklilik onceligin olmali."
 
     # Strateji bolumu
-    strategy = f"{weight_note} "
+    strategy = f"Merhaba {first_name}! {weight_note} "
     if strategy_type == "dovus":
         strategy += f"Hedefiniz '{goals}' dogrultusunda dovus sporlarina odakli bir program hazirlandi. Haftalik {freq} gun antrenman ile teknik calisma, kondisyon ve guc dengesini kuruyoruz. Ekipman durumunuz ({equipment or 'belirtilmemis'}) goz onune alinarak program adapte edildi."
     elif strategy_type == "guc":
@@ -170,9 +175,9 @@ def generate_offline_advice(weight, goals, frequency, focus, equipment):
 
     # Motivasyon bolumu
     motivations = [
-        f"Unutma, {freq} gun duzenli antrenman bile buyuk fark yaratir. Her tekrar seni daha guclu yapiyor. Hedefin '{goals}' - buna layiksin ve basaracaksin!",
-        f"Basari tesadufi degildir. Her gun biraz daha iyi ol. {w} kg'lik bedenini bir savaş makinesine dönüştürecek disiplini göster. Sen bir hibrit atletsin!",
-        f"Dünden daha güçlüsün. Bugün antrenmanını yap, yarın sonuçlarını gör. Hedefin '{goals}' - bu yolda tek rakibin dünkü kendinsin!",
+        f"Unutma {first_name}, {freq} gun duzenli antrenman bile buyuk fark yaratir. Her tekrar seni daha guclu yapiyor. Hedefin '{goals}' - buna layiksin ve basaracaksin!",
+        f"Basari tesadufi degildir {first_name}. Her gun biraz daha iyi ol. {w} kg'lik bedenini bir savaş makinesine dönüştürecek disiplini göster. Sen bir hibrit atletsin!",
+        f"Dünden daha güçlüsün {first_name}. Bugün antrenmanını yap, yarın sonuçlarını gör. Hedefin '{goals}' - bu yolda tek rakibin dünkü kendinsin!",
     ]
     import random
     motivation = random.choice(motivations)
@@ -547,8 +552,26 @@ async def login(data: LoginModel):
 @app.post("/api/save")
 async def save_period(data: SaveModel):
     try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            
+            # Kullanicinin adini alalim
+            cursor = await db.execute("SELECT first_name FROM users WHERE id = ?", (data.user_id,))
+            user = await cursor.fetchone()
+            first_name = user["first_name"] if user else "Sporcu"
+            
+            # Son 1RM (En Iyi Kaldiris) verilerini alalim
+            cursor = await db.execute("SELECT exercise, estimated_1rm FROM one_rm WHERE user_id = ? ORDER BY date DESC LIMIT 3", (data.user_id,))
+            recent_1rms = await cursor.fetchall()
+            rm_text = ", ".join([f"{r['exercise']}: {r['estimated_1rm']}kg" for r in recent_1rms]) if recent_1rms else "Kayıtlı kaldiriş derecesi yok"
+            
+            # Son antrenman gunluklerinden enerji ve ruh hali alalim
+            cursor = await db.execute("SELECT title, mood, energy FROM training_log WHERE user_id = ? ORDER BY date DESC LIMIT 3", (data.user_id,))
+            recent_logs = await cursor.fetchall()
+            logs_text = ", ".join([f"{r['title']} (Ruh Hali: {r['mood']}/5, Enerji: {r['energy']}/5)" for r in recent_logs]) if recent_logs else "Son antrenman kaydi yok"
+            
         advice = await generate_ai_advice(
-            data.weight, data.goals, data.frequency, data.focus, data.equipment
+            data.weight, data.goals, data.frequency, data.focus, data.equipment, first_name, rm_text, logs_text
         )
 
         record_id = str(uuid.uuid4())
